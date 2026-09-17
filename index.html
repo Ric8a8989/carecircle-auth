@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow, noarchive">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oLBHOfwbHAYgwt5Fyfkku9kYX1aGSZbNha75AiGk0kU='; style-src 'sha256-bMdYmR630HpYJPr5OYmpKfc8PSy1rRAUlBfSvlaRPB8='; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-8WplTkNvqxCBLGBAq9JG/YFos5GU2TxZ8TtUrWDGsvg='; style-src 'sha256-bMdYmR630HpYJPr5OYmpKfc8PSy1rRAUlBfSvlaRPB8='; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Continue in CareCircle</title>
   <script>(function () {
   'use strict';
@@ -83,28 +83,47 @@
     let credentials = result.credentials || null;
     // Do not leave a second reference to the credentials in the parsed result.
     delete result.credentials;
-    let button;
+    let button, status, label;
     function clear() {
       credentials = null;
       if (button) button.disabled = true;
     }
     browser.addEventListener('pagehide', clear);
 
-    function render() {
-      button = document.getElementById('open-carecircle');
-      const status = document.getElementById('link-status');
-      const label = document.getElementById('link-label');
+    // A same-document link does not rerun this script. Discard both the old
+    // credentials and the new fragment; never retain or automatically forward it.
+    browser.addEventListener('hashchange', () => {
+      credentials = null;
+      try {
+        browser.history.replaceState(null, '', browser.location.pathname);
+        result.kind = 'changed';
+      } catch {
+        result.kind = 'privacy';
+      }
+      // Scrub before touching the DOM, including when the page is still loading.
+      if (button) updateView();
+    });
+
+    function updateView() {
       const copy = {
         ready: ['Continue on your iPhone', 'If CareCircle is installed on this iPhone, use the button below. The app will check your account status.'],
         empty: ['Continue in the app', 'Open your latest verification email, or sign in directly in CareCircle on your iPhone.'],
         expired: ['This link could not be used', 'It may have expired or already been used. Try signing in to CareCircle. If the app still asks you to verify, request a new email there.'],
         invalid: ['Use your latest verification email', 'This link cannot be opened here. Return to CareCircle on your iPhone and sign in, or request a new verification email if needed.'],
+        changed: ['Continue directly in CareCircle', 'This page received another link. For your privacy, open CareCircle on your iPhone and sign in with your email and original password.'],
         privacy: ['Continue directly in CareCircle', 'This browser could not safely prepare the link. Open CareCircle on your iPhone and sign in with your email and original password.'],
       }[result.kind];
       label.textContent = copy[0];
       status.textContent = copy[1];
       button.hidden = !credentials;
       button.disabled = !credentials;
+    }
+
+    function render() {
+      button = document.getElementById('open-carecircle');
+      status = document.getElementById('link-status');
+      label = document.getElementById('link-label');
+      updateView();
       button.addEventListener('click', event => {
         // Keyboard and assistive-technology activations are trusted user clicks.
         // Script-generated events must never forward credentials.
