@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oLBHOfwbHAYgwt5Fyfkku9kYX1aGSZbNha75AiGk0kU='; style-src 'sha256-bMdYmR630HpYJPr5OYmpKfc8PSy1rRAUlBfSvlaRPB8='; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Continue in CareCircle</title>
+  <script>(function () {
+  'use strict';
+
+  const APP_CALLBACK = 'carecircle://auth-callback';
+  const MAX_FRAGMENT_LENGTH = 16384;
+  const MAX_TOKEN_LENGTH = 8192;
+  const ALLOWED_FIELDS = new Set([
+    'access_token', 'refresh_token', 'type', 'token_type', 'expires_in', 'expires_at',
+  ]);
+
+  function usableToken(value) {
+    return typeof value === 'string' && value.length > 0 && value.length <= MAX_TOKEN_LENGTH
+      && /^[A-Za-z0-9._~+/=-]+$/.test(value);
+  }
+
+  // This checks only the link's structure. It does not verify a session or account.
+  function parseCallback(search, fragment, now = Date.now()) {
+    if (typeof search !== 'string' || typeof fragment !== 'string') return {kind: 'invalid'};
+    // Implicit credentials belong only in the fragment. Query/fragment mixtures,
+    // PKCE codes, redirect overrides, and query-based errors are never forwarded.
+    if (search) return {kind: 'invalid'};
+    if (!fragment || fragment === '#') return {kind: 'empty'};
+    if (!fragment.startsWith('#') || fragment.length > MAX_FRAGMENT_LENGTH) return {kind: 'invalid'};
+
+    const fields = new URLSearchParams(fragment.slice(1));
+    const seen = new Set();
+    for (const [name] of fields) {
+      if (seen.has(name)) return {kind: 'invalid'};
+      seen.add(name);
+    }
+    if (['error', 'error_code', 'error_description'].some(name => fields.has(name))) return {kind: 'expired'};
+    if (fields.has('code')) return {kind: 'invalid'};
+    if ([...seen].some(name => !ALLOWED_FIELDS.has(name))) return {kind: 'invalid'};
+
+    const accessToken = fields.get('access_token');
+    const refreshToken = fields.get('refresh_token');
+    const type = fields.get('type');
+    if (!usableToken(accessToken) || !usableToken(refreshToken) || !['signup', 'email'].includes(type)) return {kind: 'invalid'};
+    if (fields.has('token_type') && fields.get('token_type') !== 'bearer') return {kind: 'invalid'};
+    for (const name of ['expires_at', 'expires_in']) {
+      if (fields.has(name) && !/^\d{1,13}$/.test(fields.get(name))) return {kind: 'invalid'};
+    }
+    if (fields.has('expires_at') && Number(fields.get('expires_at')) <= Math.floor(now / 1000)) return {kind: 'expired'};
+    return {kind: 'ready', credentials: {accessToken, refreshToken, type}};
+  }
+
+  function captureAndScrub(browser) {
+    let fragment, search;
+    try {
+      fragment = browser.location.hash;
+      search = browser.location.search;
+      // First action after capture: remove credentials and queries from this
+      // history entry. Never parse, render, fetch, or navigate before this succeeds.
+      browser.history.replaceState(null, '', browser.location.pathname);
+    } catch {
+      return {kind: 'privacy'};
+    }
+    return parseCallback(search, fragment);
+  }
+
+  function appCallback(credentials) {
+    if (!credentials || !usableToken(credentials.accessToken) || !usableToken(credentials.refreshToken)
+      || !['signup', 'email'].includes(credentials.type)) return null;
+    const fragment = new URLSearchParams({
+      access_token: credentials.accessToken,
+      refresh_token: credentials.refreshToken,
+      type: credentials.type,
+    });
+    return APP_CALLBACK + '#' + fragment.toString();
+  }
+
+  function start(browser, document) {
+    const result = captureAndScrub(browser);
+    let credentials = result.credentials || null;
+    // Do not leave a second reference to the credentials in the parsed result.
+    delete result.credentials;
+    let button;
+    function clear() {
+      credentials = null;
+      if (button) button.disabled = true;
+    }
+    browser.addEventListener('pagehide', clear);
+
+    function render() {
+      button = document.getElementById('open-carecircle');
+      const status = document.getElementById('link-status');
+      const label = document.getElementById('link-label');
+      const copy = {
+        ready: ['Continue on your iPhone', 'If CareCircle is installed on this iPhone, use the button below. The app will check your account status.'],
+        empty: ['Continue in the app', 'Open your latest verification email, or sign in directly in CareCircle on your iPhone.'],
+        expired: ['This link could not be used', 'It may have expired or already been used. Try signing in to CareCircle. If the app still asks you to verify, request a new email there.'],
+        invalid: ['Use your latest verification email', 'This link cannot be opened here. Return to CareCircle on your iPhone and sign in, or request a new verification email if needed.'],
+        privacy: ['Continue directly in CareCircle', 'This browser could not safely prepare the link. Open CareCircle on your iPhone and sign in with your email and original password.'],
+      }[result.kind];
+      label.textContent = copy[0];
+      status.textContent = copy[1];
+      button.hidden = !credentials;
+      button.disabled = !credentials;
+      button.addEventListener('click', event => {
+        // Keyboard and assistive-technology activations are trusted user clicks.
+        // Script-generated events must never forward credentials.
+        if (!event.isTrusted || !credentials) return;
+        const callback = appCallback(credentials);
+        clear();
+        if (!callback) return;
+        button.textContent = 'Open requested';
+        status.textContent = 'If CareCircle did not open, follow the iPhone sign-in instructions below. This page cannot check whether you are signed in.';
+        try { browser.location.assign(callback); } catch {
+          status.textContent = 'CareCircle could not be opened here. Open it on your iPhone and sign in with your email and original password.';
+        }
+      });
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', render, {once: true});
+    else render();
+  }
+
+  if (typeof module !== 'undefined' && module.exports) module.exports = {parseCallback, captureAndScrub, appCallback, start};
+  else start(window, document);
+})();
+</script>
+  <style>:root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#233d33;background:#f4f7f4;font-synthesis:none}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;min-height:100svh;background:radial-gradient(ellipse at top left,#e4efe6 0,transparent 62%);font-size:17px;line-height:1.6}
+[hidden]{display:none!important}
+.shell{width:min(100% - 40px,650px);margin:0 auto;padding:42px 0 32px}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:-.03em;font-size:23px;margin-bottom:32px}
+.mark{display:grid;place-items:center;width:37px;height:37px;border:2px solid #527962;border-radius:50%;color:#527962;font-size:27px;line-height:1;font-weight:400}
+main{background:#fff;border:1px solid #dbe5dd;border-radius:28px;padding:38px;box-shadow:0 16px 60px #2643330a}
+.eyebrow{font-size:12px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#476654;margin:0 0 12px}
+h1{font-size:clamp(30px,6vw,40px);line-height:1.14;letter-spacing:-.045em;margin:0 0 18px;font-weight:700}
+.intro{color:#4b6055;margin:0 0 26px}
+.link-card{padding:23px;background:#f2f7f1;border:1px solid #dce9dc;border-radius:18px}
+h2{font-size:19px;line-height:1.35;letter-spacing:-.018em;margin:0 0 10px}
+p{margin:0 0 16px}
+.link-card p{color:#3f5849;margin-bottom:0;font-size:16px}
+button{display:block;width:100%;min-height:54px;border:0;border-radius:13px;background:#315f46;color:#fff;font:inherit;font-size:17px;font-weight:650;margin-top:20px;padding:14px 16px;cursor:pointer;touch-action:manipulation}
+button:hover:not(:disabled){background:#244b36}
+button:focus-visible{outline:3px solid #1f6ec2;outline-offset:4px}
+button:disabled{background:#dbe7dd;color:#395644;cursor:default}
+.computer{margin-top:28px;padding-top:27px;border-top:1px solid #e2e8e3}
+ol{padding-left:22px;margin:14px 0 18px}
+li{padding-left:5px;margin-bottom:9px}
+.note{font-size:15px;color:#4b6055;margin-bottom:0}
+.privacy{font-size:13px;line-height:1.55;color:#4e6457;padding:21px 12px 0;margin:0;text-align:center}
+noscript p{margin:18px 0 0;font-size:15px;color:#75482c}
+@media(max-width:480px){.shell{width:calc(100% - 28px);padding-top:25px}.brand{margin-bottom:23px;font-size:21px}main{padding:27px 22px;border-radius:24px}.link-card{padding:19px}.computer{margin-top:24px;padding-top:23px}}
+@media(prefers-reduced-motion:no-preference){button{transition:background-color .15s ease}}
+</style>
+</head>
+<body>
+  <div class="shell">
+    <header class="brand"><span class="mark" aria-hidden="true">+</span>CareCircle</header>
+    <main>
+      <p class="eyebrow">A little care, every step</p>
+      <h1>Continue in CareCircle.</h1>
+      <p class="intro">Your account belongs in the app. This page helps you get there without showing your private information.</p>
+      <section class="link-card" aria-labelledby="link-label">
+        <h2 id="link-label">Continue on your iPhone</h2>
+        <p id="link-status" role="status" aria-live="polite">Use the instructions below to continue securely.</p>
+        <button type="button" id="open-carecircle" hidden disabled>Open CareCircle</button>
+      </section>
+      <section class="computer" aria-labelledby="computer-title">
+        <h2 id="computer-title">Opened this on your Mac?</h2>
+        <ol>
+          <li>Return to <strong>CareCircle on your iPhone</strong>.</li>
+          <li>Sign in with the email address you registered and the <strong>original password you chose</strong>.</li>
+          <li>The app will check your verification status and guide you from there.</li>
+        </ol>
+        <p class="note">Still asked to verify? Request a new verification email from CareCircle and use the latest link. This page cannot confirm whether your email is verified or give you account access.</p>
+      </section>
+      <noscript><p>JavaScript is unavailable, so this page cannot prepare your link. Follow the iPhone sign-in instructions above.</p></noscript>
+    </main>
+    <p class="privacy">No analytics. No browser storage.<br>Closing or reloading this page clears the sign-in details it holds.</p>
+  </div>
+</body>
+</html>
